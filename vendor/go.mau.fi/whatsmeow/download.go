@@ -22,8 +22,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waMediaTransport"
+	"go.mau.fi/whatsmeow/proto/waServerSync"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/util/cbcutil"
 	"go.mau.fi/whatsmeow/util/hkdfutil"
@@ -50,11 +52,14 @@ const (
 // All of the downloadable messages inside a Message struct implement this interface
 // (ImageMessage, VideoMessage, AudioMessage, DocumentMessage, StickerMessage).
 type DownloadableMessage interface {
-	proto.Message
 	GetDirectPath() string
 	GetMediaKey() []byte
 	GetFileSHA256() []byte
 	GetFileEncSHA256() []byte
+}
+
+type MediaTypeable interface {
+	GetMediaType() MediaType
 }
 
 // DownloadableThumbnail represents a protobuf message that contains a thumbnail attachment.
@@ -70,15 +75,15 @@ type DownloadableThumbnail interface {
 
 // All the message types that are intended to be downloadable
 var (
-	_ DownloadableMessage   = (*waProto.ImageMessage)(nil)
-	_ DownloadableMessage   = (*waProto.AudioMessage)(nil)
-	_ DownloadableMessage   = (*waProto.VideoMessage)(nil)
-	_ DownloadableMessage   = (*waProto.DocumentMessage)(nil)
-	_ DownloadableMessage   = (*waProto.StickerMessage)(nil)
-	_ DownloadableMessage   = (*waProto.StickerMetadata)(nil)
-	_ DownloadableMessage   = (*waProto.HistorySyncNotification)(nil)
-	_ DownloadableMessage   = (*waProto.ExternalBlobReference)(nil)
-	_ DownloadableThumbnail = (*waProto.ExtendedTextMessage)(nil)
+	_ DownloadableMessage   = (*waE2E.ImageMessage)(nil)
+	_ DownloadableMessage   = (*waE2E.AudioMessage)(nil)
+	_ DownloadableMessage   = (*waE2E.VideoMessage)(nil)
+	_ DownloadableMessage   = (*waE2E.DocumentMessage)(nil)
+	_ DownloadableMessage   = (*waE2E.StickerMessage)(nil)
+	_ DownloadableMessage   = (*waHistorySync.StickerMetadata)(nil)
+	_ DownloadableMessage   = (*waE2E.HistorySyncNotification)(nil)
+	_ DownloadableMessage   = (*waServerSync.ExternalBlobReference)(nil)
+	_ DownloadableThumbnail = (*waE2E.ExtendedTextMessage)(nil)
 )
 
 type downloadableMessageWithLength interface {
@@ -93,7 +98,7 @@ type downloadableMessageWithSizeBytes interface {
 
 type downloadableMessageWithURL interface {
 	DownloadableMessage
-	GetUrl() string
+	GetURL() string
 }
 
 var classToMediaType = map[protoreflect.Name]MediaType{
@@ -124,7 +129,7 @@ var mediaTypeToMMSType = map[MediaType]string{
 }
 
 // DownloadAny loops through the downloadable parts of the given message and downloads the first non-nil item.
-func (cli *Client) DownloadAny(msg *waProto.Message) (data []byte, err error) {
+func (cli *Client) DownloadAny(msg *waE2E.Message) (data []byte, err error) {
 	if msg == nil {
 		return nil, ErrNothingDownloadableFound
 	}
@@ -159,7 +164,7 @@ func getSize(msg DownloadableMessage) int {
 //
 // This is primarily intended for downloading link preview thumbnails, which are in ExtendedTextMessage:
 //
-//	var msg *waProto.Message
+//	var msg *waE2E.Message
 //	...
 //	thumbnailImageBytes, err := cli.DownloadThumbnail(msg.GetExtendedTextMessage())
 func (cli *Client) DownloadThumbnail(msg DownloadableThumbnail) ([]byte, error) {
@@ -175,28 +180,39 @@ func (cli *Client) DownloadThumbnail(msg DownloadableThumbnail) ([]byte, error) 
 
 // GetMediaType returns the MediaType value corresponding to the given protobuf message.
 func GetMediaType(msg DownloadableMessage) MediaType {
-	return classToMediaType[msg.ProtoReflect().Descriptor().Name()]
+	protoReflecter, ok := msg.(proto.Message)
+	if !ok {
+		mediaTypeable, ok := msg.(MediaTypeable)
+		if !ok {
+			return ""
+		}
+		return mediaTypeable.GetMediaType()
+	}
+	return classToMediaType[protoReflecter.ProtoReflect().Descriptor().Name()]
 }
 
 // Download downloads the attachment from the given protobuf message.
 //
 // The attachment is a specific part of a Message protobuf struct, not the message itself, e.g.
 //
-//	var msg *waProto.Message
+//	var msg *waE2E.Message
 //	...
 //	imageData, err := cli.Download(msg.GetImageMessage())
 //
 // You can also use DownloadAny to download the first non-nil sub-message.
 func (cli *Client) Download(msg DownloadableMessage) ([]byte, error) {
-	mediaType, ok := classToMediaType[msg.ProtoReflect().Descriptor().Name()]
-	if !ok {
-		return nil, fmt.Errorf("%w '%s'", ErrUnknownMediaType, string(msg.ProtoReflect().Descriptor().Name()))
+	if cli == nil {
+		return nil, ErrClientIsNil
+	}
+	mediaType := GetMediaType(msg)
+	if mediaType == "" {
+		return nil, fmt.Errorf("%w %T", ErrUnknownMediaType, msg)
 	}
 	urlable, ok := msg.(downloadableMessageWithURL)
 	var url string
 	var isWebWhatsappNetURL bool
 	if ok {
-		url = urlable.GetUrl()
+		url = urlable.GetURL()
 		isWebWhatsappNetURL = strings.HasPrefix(url, "https://web.whatsapp.net")
 	}
 	if len(url) > 0 && !isWebWhatsappNetURL {
@@ -229,12 +245,12 @@ func (cli *Client) DownloadMediaWithPath(directPath string, encFileHash, fileHas
 		// TODO omit hash for unencrypted media?
 		mediaURL := fmt.Sprintf("https://%s%s&hash=%s&mms-type=%s&__wa-mms=", host.Hostname, directPath, base64.URLEncoding.EncodeToString(encFileHash), mmsType)
 		data, err = cli.downloadAndDecrypt(mediaURL, mediaKey, mediaType, fileLength, encFileHash, fileHash)
-		if err == nil || errors.Is(err, ErrFileLengthMismatch) || errors.Is(err, ErrInvalidMediaSHA256) {
+		if err == nil || errors.Is(err, ErrFileLengthMismatch) || errors.Is(err, ErrInvalidMediaSHA256) ||
+			errors.Is(err, ErrMediaDownloadFailedWith403) || errors.Is(err, ErrMediaDownloadFailedWith404) || errors.Is(err, ErrMediaDownloadFailedWith410) {
 			return
 		} else if i >= len(mediaConn.Hosts)-1 {
 			return nil, fmt.Errorf("failed to download media from last host: %w", err)
 		}
-		// TODO there are probably some errors that shouldn't retry
 		cli.Log.Warnf("Failed to download media: %s, trying with next host...", err)
 	}
 	return
@@ -288,13 +304,13 @@ func (cli *Client) downloadPossiblyEncryptedMediaWithRetries(url string, checksu
 		if errors.As(err, &httpErr) {
 			retryDuration = retryafter.Parse(httpErr.Response.Header.Get("Retry-After"), retryDuration)
 		}
-		cli.Log.Warnf("Failed to download media due to network error: %w, retrying in %s...", err, retryDuration)
+		cli.Log.Warnf("Failed to download media due to network error: %v, retrying in %s...", err, retryDuration)
 		time.Sleep(retryDuration)
 	}
 	return
 }
 
-func (cli *Client) downloadMedia(url string) ([]byte, error) {
+func (cli *Client) doMediaDownloadRequest(url string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare request: %w", err)
@@ -309,22 +325,34 @@ func (cli *Client) downloadMedia(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return nil, DownloadHTTPError{Response: resp}
 	}
-	return io.ReadAll(resp.Body)
+	return resp, nil
 }
+
+func (cli *Client) downloadMedia(url string) ([]byte, error) {
+	resp, err := cli.doMediaDownloadRequest(url)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return data, err
+}
+
+const mediaHMACLength = 10
 
 func (cli *Client) downloadEncryptedMedia(url string, checksum []byte) (file, mac []byte, err error) {
 	data, err := cli.downloadMedia(url)
 	if err != nil {
 		return
-	} else if len(data) <= 10 {
+	} else if len(data) <= mediaHMACLength {
 		err = ErrTooShortFile
 		return
 	}
-	file, mac = data[:len(data)-10], data[len(data)-10:]
+	file, mac = data[:len(data)-mediaHMACLength], data[len(data)-mediaHMACLength:]
 	if len(checksum) == 32 && sha256.Sum256(data) != *(*[32]byte)(checksum) {
 		err = ErrInvalidMediaEncSHA256
 	}
@@ -335,7 +363,7 @@ func validateMedia(iv, file, macKey, mac []byte) error {
 	h := hmac.New(sha256.New, macKey)
 	h.Write(iv)
 	h.Write(file)
-	if !hmac.Equal(h.Sum(nil)[:10], mac) {
+	if !hmac.Equal(h.Sum(nil)[:mediaHMACLength], mac) {
 		return ErrInvalidMediaHMAC
 	}
 	return nil

@@ -56,6 +56,17 @@ message CallLogRecord {
 	optional CallType callType = 15;
 }
 
+message NotificationActivitySettingAction {
+	enum NotificationActivitySetting {
+		DEFAULT_ALL_MESSAGES = 0;
+		ALL_MESSAGES = 1;
+		HIGHLIGHTS = 2;
+		DEFAULT_HIGHLIGHTS = 3;
+	}
+
+	optional NotificationActivitySetting notificationActivitySetting = 1;
+}
+
 message WaffleAccountLinkStateAction {
 	enum AccountLinkState {
 		ACTIVE = 0;
@@ -114,6 +125,34 @@ message MarketingMessageAction {
 	optional string mediaID = 7;
 }
 
+message UsernameChatStartModeAction {
+	enum ChatStartMode {
+		LID = 1;
+		PN = 2;
+	}
+
+	optional ChatStartMode chatStartMode = 1;
+}
+
+message LabelEditAction {
+	enum ListType {
+		NONE = 0;
+		UNREAD = 1;
+		GROUPS = 2;
+		FAVORITES = 3;
+		PREDEFINED = 4;
+		CUSTOM = 5;
+	}
+
+	optional string name = 1;
+	optional int32 color = 2;
+	optional int32 predefinedID = 3;
+	optional bool deleted = 4;
+	optional int32 orderIndex = 5;
+	optional bool isActive = 6;
+	optional ListType type = 7;
+}
+
 message PatchDebugData {
 	enum Platform {
 		ANDROID = 0;
@@ -123,6 +162,8 @@ message PatchDebugData {
 		WEB = 4;
 		UWP = 5;
 		DARWIN = 6;
+		IPAD = 7;
+		WEAROS = 8;
 	}
 
 	optional bytes currentLthash = 1;
@@ -196,6 +237,8 @@ message SyncActionValue {
 	optional FavoritesAction favoritesAction = 56;
 	optional MerchantPaymentPartnerAction merchantPaymentPartnerAction = 57;
 	optional WaffleAccountLinkStateAction waffleAccountLinkStateAction = 58;
+	optional UsernameChatStartModeAction usernameChatStartMode = 59;
+	optional NotificationActivitySettingAction notificationActivitySettingAction = 60;
 }
 
 message FavoritesAction {
@@ -377,14 +420,6 @@ message ArchiveChatAction {
 
 message RecentEmojiWeightsAction {
 	repeated RecentEmojiWeight weights = 1;
-}
-
-message LabelEditAction {
-	optional string name = 1;
-	optional int32 color = 2;
-	optional int32 predefinedID = 3;
-	optional bool deleted = 4;
-	optional int32 orderIndex = 5;
 }
 
 message LabelAssociationAction {
